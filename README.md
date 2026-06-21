@@ -1,195 +1,342 @@
-# Raphael — Tensura Minecraft Mod Discord Bot
+# Raphael Reborn
 
-A Discord bot themed as Raphael, Lord of Wisdom. Answers questions about the [Tensura Minecraft mod](https://tensura.wiki.gg/) by retrieving data from the wiki and responding in Raphael's voice. Any message ending with `?` triggers a response.
+A Discord bot that answers questions about the [Tensura: Reincarnated Minecraft mod](https://tensura.wiki.gg/) in the voice of Raphael, Lord of Wisdom. Any message starting with `Raphael, ` triggers a response.
+
+Raphael retrieves relevant wiki pages from a vector store, optionally grounds its persona in actual anime dialogue, re-ranks the results with a cross-encoder, then generates a response with an LLM.
 
 ---
 
-## First-Time Setup
+## Architecture
 
-**Prerequisites:** Python 3.11+, a Discord bot token, a Groq API key.
+```
+Discord message "Raphael, ..."
+  │
+  ▼
+bot          — receives message, rate-limits via NATS KV, publishes to NATS stream
+  │
+  ▼  NATS JetStream "MESSAGES"
+  │
+  ▼
+worker       — pulls event, queries Qdrant (wiki + subtitles), re-ranks results,
+               calls LLM (Groq or Ollama), publishes reply to NATS stream "REPLIES"
+  │
+  ▼
+bot          — receives reply, sends to Discord channel
 
-**1. Clone and enter the project**
-```bash
-cd ~/Projects/Raphael
+Wiki sync:
+  POST /sync/wiki → api service → scrape wiki → upsert to Qdrant
+  POST /sync/addons → api service → scrape configured add-on/wiki/modpack pages → upsert to Qdrant
 ```
 
-**2. Create and activate a virtual environment**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-You'll see `(.venv)` in your prompt. Run this activation command every time you open a new terminal.
+**Services (Docker Compose):**
 
-**3. Install dependencies**
-```bash
-pip install -r requirements.txt
-```
+| Service  | Role                                          |
+| -------- | --------------------------------------------- |
+| `bot`    | Discord gateway — thin event bridge           |
+| `worker` | RAG pipeline + LLM inference                  |
+| `api`    | FastAPI — sync triggers, health, stats         |
+| `qdrant` | Vector store — `wiki` + `addons` + `subtitles` collections |
+| `nats`   | JetStream — event streaming + KV state         |
+| `ollama` | Local LLM (optional — enable with `--profile local-llm`) |
 
-**4. Configure secrets**
+---
+
+## Prerequisites
+
+- Docker + Docker Compose v2
+- A Discord bot token ([guide](https://discord.com/developers/docs/getting-started))
+- A Groq API key ([console.groq.com](https://console.groq.com)) — or run Ollama locally
+- *(Optional)* An OpenSubtitles.com account for automated subtitle download
+
+---
+
+## Quick Start
+
+### 1. Clone and configure
+
 ```bash
+git clone <repo-url>
+cd Raphael-Reborn
 cp .env.example .env
 ```
-Open `.env` and fill in your `DISCORD_TOKEN` and `GROQ_API_KEY`.
 
-**5. Build the wiki index** *(takes ~7 minutes — fetches all ~836 wiki pages)*
-```bash
-python scripts/build_index.py
-```
-
-**6. Verify the index built correctly**
-```bash
-python -c "from rag.indexer import get_collection; c = get_collection(); print(len(c.get()['ids']), 'chunks indexed')"
-```
-Expect 2,500+ chunks.
-
-**7. Install pm2** *(keeps the bot running persistently — survives terminal close and reboots)*
-```bash
-npm install -g pm2
-```
-
-**8. Start the bot via pm2**
-```bash
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup   # follow the printed command to enable auto-start on reboot
-```
-
-This starts three processes:
-- **raphael** — the Discord bot
-- **raphael-caffeinate** — prevents macOS idle/display sleep (`caffeinate -di`)
-- **raphael-sync** — a cron job that runs `--incremental` wiki sync daily at 03:00
-
-> **Sleep note:** `caffeinate -di` prevents idle and display sleep while the bot is running.
-> If the lid is closed on battery, macOS may still sleep. For guaranteed 24/7 uptime,
-> consider running the bot on a VPS instead.
-
----
-
-## Daily Usage
-
-**Bot control:**
-```bash
-pm2 status                  # check both raphael and raphael-sync
-pm2 logs raphael            # tail live bot logs
-pm2 logs raphael-sync       # tail sync job logs
-pm2 restart raphael         # restart after code changes
-pm2 stop raphael            # stop the bot
-```
-
-**Index management:**
-
-| Command | When to use |
-|---------|-------------|
-| `python scripts/build_index.py --incremental` | New or edited wiki pages since last run (runs automatically at 03:00 — use this to trigger manually outside the cron) |
-| `python scripts/build_index.py --cached` | Re-index from the local disk cache without hitting the wiki API (useful after code changes to the chunker/indexer) |
-| `python scripts/build_index.py --refresh` | Force re-fetch every page from the wiki and rebuild the index from scratch |
-| `python scripts/build_index.py` | First-time full build only — fetches all pages, skipping any already on disk |
-
-> **Note:** `--incremental` picks up both new pages and edits via the MediaWiki `recentchanges` API. It is the right command whenever you want to pull in anything that changed on the wiki since the last sync.
-
----
-
-## Personal Working Guidelines
-
-This section defines how I work with Claude on this project.
-
----
-
-## Before Any Project
-
-1. Verify machine setup is complete: Homebrew, Node, `gh`, SSH, git identity, `gh auth login`
-2. Create project folder + GitHub repo:
-   ```bash
-   mkdir ~/Projects/your-project && cd ~/Projects/your-project
-   git init && gh repo create your-project --private --source=. --remote=origin
-   ```
-3. Create a project-specific `CLAUDE.md` with stack, conventions, and constraints
-
----
-
-## Every Session
-
-**State the goal first.** Not "let's work on the project" — be specific:
-> "Today I want to implement user login. Backend is stubbed. I have 2 hours."
-
-**Model check:**
-- Sonnet is default — stay here for planning, reviews, fixes, single-file work
-- Switch to Opus (`/model opus`) only for major multi-file implementation or non-obvious debugging
-- Switch back after the heavy coding is done
-
----
-
-## Starting Something New
+Edit `.env` — fill in at minimum:
 
 ```
-1. /plan [describe what you want]   ← Always. Even for small things.
-2. Read and review the plan
-3. Confirm → then implement
+DISCORD_TOKEN=your_discord_bot_token
+GROQ_API_KEY=your_groq_api_key
+QDRANT_API_KEY=<generate: python -c "import secrets; print(secrets.token_hex(32))">
+API_KEYS=sync:<generate key>,read:<generate key>,admin:<generate key>
 ```
 
-Never skip the plan step. A 5-minute plan prevents a 2-hour refactor.
-
----
-
-## During Implementation
-
-- Ask "why" before asking for a fix — understanding comes first
-- Review what Claude writes before approving — don't just hit Enter
-- If something feels wrong, say so even without knowing why: "this doesn't feel right, explain it"
-- Keep an eye on file sizes — flag if something is growing too large
-- Use `/tdd` — tests are written before implementation, always
-
----
-
-## Tests
+### 2. Start services
 
 ```bash
-/tdd                  # write tests first (RED → GREEN → refactor)
-/e2e                  # run end-to-end tests for critical user flows
-/test-coverage        # verify coverage is ≥ 80%
+docker compose up -d --build
 ```
 
----
+### 3. Seed the knowledge indexes
 
-## Before Every Commit
+This runs once and rebuilds the searchable Qdrant collections from configured
+sources: the main Tensura wiki, TRBeyond docs, the Beyond Worlds modpack
+manifest, bundled Modrinth project metadata, and each bundled mod's `wiki_url`
+up to `ADDON_MOD_WIKI_MAX_PAGES` pages.
 
 ```bash
-/code-review          # catch quality issues
-/security-review      # if touching auth, user input, or credentials
+docker compose run --rm api python scripts/seed_knowledge.py
 ```
 
-Commit format:
-```
-feat: what you added
-fix: what you fixed
-refactor: what you restructured
-```
-
----
-
-## When Stuck
-
-1. State expected vs. actual: "I expected X, I got Y"
-2. Ask Claude to explain *why* before asking for a fix
-3. Build error → `/build-fix`
-4. Stuck 10+ minutes → compact and restate the problem fresh
-
----
-
-## Weekly Habits
+For a faster external-source-only refresh after the main wiki is already indexed:
 
 ```bash
-/instinct-status      # see what patterns Claude has learned from your sessions
-/security-review      # before anything goes near production
+docker compose run --rm api python scripts/seed_addons.py
+```
+
+### 4. (Optional) Add subtitle persona data
+
+See the [Subtitle Setup](#subtitle-setup) section below.
+
+The bot works without subtitles — they improve Raphael's voice accuracy but are not required.
+
+### 5. Verify everything is running
+
+```bash
+docker compose ps
+curl http://localhost:8080/health
+curl http://localhost:8080/stats -H "Authorization: Bearer <your_read_key>"
 ```
 
 ---
 
-## The Short Version
+## Subtitle Setup
+
+The `subtitles` Qdrant collection holds Raphael's actual anime dialogue. The worker uses these lines as tonal grounding when building responses — the LLM sees real examples of how Raphael speaks.
+
+**Only Raphael's lines are indexed.** Every other character is stripped before the data reaches Qdrant.
+
+### Automated download (recommended)
+
+No account needed. The script uses [subliminal](https://subliminal.readthedocs.io/) with Podnapisi and TVsubtitles providers.
+
+```bash
+docker compose run --rm api python scripts/fetch_subtitles.py
+docker compose run --rm api python scripts/seed_subtitles.py
+```
+
+`fetch_subtitles.py` searches for English subtitles across all Tensura seasons and saves them to `subtitles/`. It skips already-present files, so reruns are safe.
+
+**Coverage note:** Podnapisi and TVsubtitles have broad coverage but are not exhaustive for anime. If an episode isn't found, add it manually. You can also uncomment the OpenSubtitles provider in `scripts/fetch_subtitles.py` if you get credentials later.
+
+### Manual (if you already have subtitle files)
+
+Drop `.srt`, `.ass`, or `.ssa` files into the `subtitles/` directory, then:
+
+```bash
+docker compose run --rm api python scripts/seed_subtitles.py
+```
+
+For reliable Raphael detection, use ASS/SSA files where the Style field is the character name (e.g. `Style=Raphael` or `Style=Great Sage`). SRT files will attempt to detect speakers from inline tags like `RAPHAEL: ...` or `[Raphael] ...`.
+
+---
+
+## Wiki Sync
+
+The wiki index is seeded once at first deploy. Subsequent syncs are triggered via the API:
+
+```bash
+# Incremental — only pages changed since last sync (fast, use regularly)
+curl -X POST http://localhost:8080/sync/wiki/incremental \
+     -H "Authorization: Bearer <sync_key>"
+
+# Full re-index — re-fetches everything (slow, use if wiki structure changed)
+curl -X POST http://localhost:8080/sync/wiki \
+     -H "Authorization: Bearer <sync_key>"
+
+# Check job status
+curl http://localhost:8080/sync/status/<job_id> \
+     -H "Authorization: Bearer <read_key>"
+
+# Re-index subtitles (after adding new subtitle files)
+curl -X POST http://localhost:8080/sync/subtitles \
+     -H "Authorization: Bearer <sync_key>"
+
+# Re-index configured external add-on pages
+curl -X POST http://localhost:8080/sync/addons \
+     -H "Authorization: Bearer <sync_key>"
+```
+
+All sync endpoints return `202 Accepted` immediately with a `job_id`. Poll `/sync/status/<job_id>` for progress.
+
+---
+
+## API Reference
+
+### Public endpoints
+
+| Method | Path       | Description              |
+| ------ | ---------- | ------------------------ |
+| `GET`  | `/health`  | Liveness check           |
+| `GET`  | `/ready`   | Readiness (checks Qdrant) |
+
+### Authenticated endpoints
+
+All require `Authorization: Bearer <key>`.
+
+| Method | Path                         | Role    | Description                         |
+| ------ | ---------------------------- | ------- | ----------------------------------- |
+| `GET`  | `/stats`                     | `read`  | Collection sizes + index health     |
+| `GET`  | `/sync/status/{job_id}`      | `read`  | Sync job status                     |
+| `POST` | `/sync/wiki`                 | `sync`  | Full wiki re-index                  |
+| `POST` | `/sync/wiki/incremental`     | `sync`  | Incremental wiki sync               |
+| `POST` | `/sync/subtitles`            | `sync`  | Re-index subtitle collection        |
+
+**Roles:** `sync` → trigger syncs. `read` → read stats/status. `admin` → all of the above.
+
+---
+
+## Local LLM
+
+### LM Studio / OpenAI-Compatible
+
+LM Studio exposes an OpenAI-compatible API. Use `LLM_PROVIDER=openai`; this sends
+chat requests to `/v1/chat/completions`.
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=http://host.docker.internal:1234
+OPENAI_MODEL=qwen/qwen3-8b
+OPENAI_ENABLE_WEB_SEARCH=true
+OPENAI_WEB_SEARCH_MAX_RESULTS=5
+```
+
+From Podman on Linux, use `host.containers.internal` instead of
+`host.docker.internal`.
+
+When `OPENAI_ENABLE_WEB_SEARCH=true`, the worker exposes a `web_search` tool to
+tool-capable OpenAI-compatible models. The model can request web results for
+current or external information, while normal Tensura wiki questions still use
+the indexed vector stores first.
+
+### Ollama
+
+To run inference locally instead of using Groq:
+
+```bash
+# Start with Ollama profile
+docker compose --profile local-llm up -d
+
+# Pull a model (llama3.2 is a good starting point)
+docker compose exec ollama ollama pull llama3.2
+
+# Switch the worker to Ollama
+# In .env:
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.2
+
+docker compose restart worker
+```
+
+Any model supported by Ollama works. Larger models (e.g. `llama3.1:70b`) give better persona accuracy but require more VRAM.
+
+---
+
+## Environment Variables
+
+| Variable                    | Required | Default                     | Description                                      |
+| --------------------------- | -------- | --------------------------- | ------------------------------------------------ |
+| `DISCORD_TOKEN`             | Yes      | —                           | Discord bot token                                |
+| `QDRANT_API_KEY`            | Yes      | —                           | Qdrant auth key (used by worker, api, and Qdrant itself) |
+| `API_KEYS`                  | Yes      | —                           | M2M keys: `"sync:key,read:key,admin:key"`        |
+| `GROQ_API_KEY`              | Groq     | —                           | Groq API key (required when `LLM_PROVIDER=groq`) |
+| `LLM_PROVIDER`              | No       | `groq`                      | `groq`, `ollama`, or `openai`                    |
+| `OPENAI_BASE_URL`           | LM Studio| —                           | OpenAI-compatible local endpoint                 |
+| `OPENAI_MODEL`              | LM Studio| —                           | Model name for OpenAI-compatible local endpoint  |
+| `OPENAI_ENABLE_WEB_SEARCH`  | No       | `false`                     | Expose the worker's web search tool to OpenAI-compatible models |
+| `OPENAI_WEB_SEARCH_MAX_RESULTS` | No    | `5`                         | Maximum web results returned to the model        |
+| `OLLAMA_MODEL`              | No       | `llama3.2`                  | Model name for Ollama                            |
+| `ADDON_SOURCE_URLS`         | No       | TRBeyond + Beyond Worlds    | External docs/modpack pages indexed into `addons` |
+| `ADDON_MOD_WIKI_MAX_PAGES`  | No       | `8`                         | Max same-site wiki/doc pages to crawl per bundled Modrinth mod |
+| `WIKI_HOST`                 | No       | `tensura.wiki.gg`           | Wiki hostname to scrape                          |
+| `OPENSUBTITLES_API_KEY`     | Subtitles| —                           | OpenSubtitles app API key                        |
+| `OPENSUBTITLES_USERNAME`    | Subtitles| —                           | OpenSubtitles username                           |
+| `OPENSUBTITLES_PASSWORD`    | Subtitles| —                           | OpenSubtitles password                           |
+
+Variables set automatically by `docker-compose.yml` (override only if running outside Docker):
+
+| Variable          | Default                      |
+| ----------------- | ---------------------------- |
+| `NATS_URL`        | `nats://nats:4222`           |
+| `QDRANT_URL`      | `http://qdrant:6333`         |
+| `OLLAMA_BASE_URL` | `http://ollama:11434`        |
+
+---
+
+## Development
+
+### Running outside Docker
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+
+# Install all deps (or install per-service extras individually)
+pip install -e ".[bot,worker,api,dev]"
+
+# Start infrastructure only
+docker compose up -d qdrant nats
+
+# Update .env with local URLs
+NATS_URL=nats://localhost:4222
+QDRANT_URL=http://localhost:6333
+
+# Run services locally
+python main_bot.py
+python main_worker.py
+python main_api.py
+```
+
+### After code changes
+
+```bash
+docker compose restart bot worker    # restart both services
+docker compose logs -f worker        # tail logs
+```
+
+### Tests
+
+```bash
+docker compose run --rm worker pytest tests/ -v
+```
+
+---
+
+## Project Layout
 
 ```
-New feature    → /plan first, always
-Implementing   → You steer, Claude writes, /tdd enforced
-Before commit  → /code-review + /security-review if needed
-Stuck          → Expected vs. actual, "why" before "fix"
+src/
+  config.py              All config via pydantic-settings (single source of truth)
+  auth/middleware.py     M2M Bearer-key validation for FastAPI
+  messaging/streams.py   NATS stream + KV bucket definitions
+  bot/                   Discord client, event handler, reply consumer, formatter
+  worker/                NATS pull consumer + RAG→rerank→LLM pipeline
+  api/                   FastAPI app + sync/health/stats routes
+  llm/
+    base.py              LLMProvider protocol
+    router.py            Query expansion + persona wrapper
+    prompts.py           Raphael system prompt + RAG prompt builder
+    providers/groq.py    4-model fallback chain (llama-3.3-70b → qwen3-32b → ...)
+    providers/ollama.py  Local LLM via Ollama REST API
+  rag/
+    embedder.py          Shared SentenceTransformer singleton (all-MiniLM-L6-v2)
+    reranker.py          Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
+    client.py            Shared Qdrant client + collection/index setup
+    wiki/                Scraper, wikitext cleaner, chunker, indexer, retriever
+    subtitles/           SRT/ASS/VTT loader, indexer (Raphael-only), retriever
+
+docker/                  Per-service Dockerfiles
+subtitles/               Drop subtitle files here (volume-mounted into api + worker)
+scripts/
+  seed_wiki.py           One-time full wiki scrape + index
+  seed_subtitles.py      Index subtitle files from subtitles/ directory
+  fetch_subtitles.py     Auto-download subtitles from OpenSubtitles
+  discord_notify.py      Post changelogs to Discord
 ```

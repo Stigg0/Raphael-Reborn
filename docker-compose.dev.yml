@@ -1,0 +1,35 @@
+# Overrides for local development.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  qdrant:
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+
+  nats:
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  bot:
+    build:
+      target: dev
+    volumes:
+      - ./src:/app/src:ro
+      - ./main_bot.py:/app/main_bot.py:ro
+
+  worker:
+    build:
+      target: dev
+    volumes:
+      - ./src:/app/src:ro
+      - ./main_worker.py:/app/main_worker.py:ro
+
+  api:
+    build:
+      target: dev
+    volumes:
+      - ./src:/app/src:ro
+      - ./subtitles:/app/subtitles:ro
+    environment:
+      UVICORN_RELOAD: "true"

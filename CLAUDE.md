@@ -1,55 +1,115 @@
-# CLAUDE.md — Raphael
+# CLAUDE.md — Raphael Reborn
 
 ## Project Overview
 
-**Raphael** is a Discord bot themed as Raphael, Lord of Wisdom from the Tensura anime. It answers questions about the [Tensura Minecraft mod](https://tensura.wiki.gg/) by retrieving wiki data and responding in-character.
+**Raphael Reborn** is a Discord bot themed as Raphael, Lord of Wisdom from the Tensura anime. It answers questions about the [Tensura Minecraft mod](https://tensura.wiki.gg/) by retrieving wiki data + anime subtitle context and responding in-character.
 
-**Trigger:** Any Discord message ending with `?` triggers a bot response (max 500 chars).
+**Trigger:** Any Discord message starting with `Raphael, ` triggers a bot response.
 
 ---
 
 ## Tech Stack
 
-| Layer                  | Technology                                                                                             |
-| ---------------------- | ------------------------------------------------------------------------------------------------------ |
-| Discord bot            | `discord.py >= 2.3.0`                                                                                  |
-| LLM inference          | Groq API (4-model chain: `llama-3.3-70b` → `qwen3-32b` → `llama-4-scout-17b` → `llama-3.1-8b-instant`) |
-| Embeddings             | `sentence-transformers` (`all-MiniLM-L6-v2`, local, no API)                                            |
-| Vector store           | ChromaDB (persistent, local at `data/chroma/`)                                                         |
-| Wiki scraping          | `mwclient` (MediaWiki API for `tensura.wiki.gg`)                                                       |
-| Process management     | PM2 (Node.js-based, keeps bot running + daily sync cron)                                               |
-| macOS sleep prevention | `caffeinate -di` (via `scripts/start.sh`)                                                              |
-| Python version         | 3.14 (`.venv/`)                                                                                        |
+| Layer            | Technology                                                                  |
+| ---------------- | --------------------------------------------------------------------------- |
+| Discord bot      | `discord.py >= 2.3.0`                                                       |
+| Message queue    | NATS JetStream (streams + KV for rate limiting & history)                   |
+| LLM inference    | Groq API (4-model chain) **or** Ollama (local, OpenAI-compatible)           |
+| Embeddings       | `sentence-transformers` (`all-MiniLM-L6-v2`, local, no API)                 |
+| Vector store     | Qdrant (networked, persistent, two collections: `wiki` + `subtitles`)       |
+| Wiki scraping    | `mwclient` (MediaWiki API for `tensura.wiki.gg`)                            |
+| Sync API         | FastAPI — M2M Bearer-key protected endpoints                                |
+| Containerisation | Docker Compose (bot, worker, api, qdrant, nats, ollama profile)             |
+| Python version   | 3.12 (in Docker)                                                            |
 
 ---
 
 ## Directory Structure
 
 ```
-bot/        Discord event handlers (on_ready, on_message, response chunker)
-llm/        Groq API wrapper + Raphael persona prompts
-rag/        Wiki scraper, wikitext cleaner/chunker, ChromaDB indexer, semantic retriever
-scripts/    build_index.py (CLI for scraping/indexing), start.sh (caffeinate wrapper)
-data/       Runtime data — NOT in git
-  pages/    Cached wiki pages as JSON (~1279 files)
-  chroma/   ChromaDB vector store (binary)
-  last_updated.txt  ISO timestamp of last sync
-main.py     Entry point — logging setup, Discord client init
-ecosystem.config.cjs  PM2 config (bot process + daily sync cron at 03:00)
+src/
+  config.py           pydantic-settings — all config, validated at boot
+  auth/
+    middleware.py     FastAPI M2M Bearer-key validation
+  messaging/
+    streams.py        NATS stream + KV definitions shared by all services
+  bot/
+    client.py         Discord client + graceful shutdown
+    events.py         on_message → NATS publish + pending-reply tracking
+    replies.py        NATS reply consumer → resolves Discord futures
+    formatter.py      Discord 2000-char chunking
+  worker/
+    consumer.py       NATS pull consumer loop
+    pipeline.py       RAG → LLM → NATS reply publish
+  api/
+    app.py            FastAPI app factory
+    routes/
+      health.py       GET /health  GET /ready
+      index.py        GET /stats
+      sync.py         POST /sync/wiki  POST /sync/wiki/incremental  POST /sync/subtitles
+  llm/
+    base.py           LLMProvider protocol
+    router.py         Wrapper with query expansion + persona
+    prompts.py        Raphael system prompt + RAG prompt builder
+    providers/
+      groq.py         4-model fallback chain
+      ollama.py       OpenAI-compatible local LLM
+  rag/
+    embedder.py       Shared SentenceTransformer singleton
+    client.py         Shared Qdrant client + collection setup
+    wiki/
+      scraper.py      mwclient MediaWiki scraper + disk cache
+      cleaner.py      Wikitext → clean text + chunk builder
+      indexer.py      Qdrant upsert
+      categories.py   Category/enumeration detection
+      normalizer.py   Query normalisation + meta-question detection
+      scoring.py      Dynamic text-contains scoring + blocking
+      retriever.py    Main orchestrator — all retrieval strategies
+    subtitles/
+      loader.py       SRT/ASS/VTT parser + speaker detection
+      indexer.py      Subtitle chunk + Qdrant upsert
+      retriever.py    Persona query (Raphael lines) + lore query
+
+docker/
+  bot.Dockerfile
+  worker.Dockerfile
+  api.Dockerfile
+subtitles/          Drop .srt / .ass / .vtt files here (volume-mounted)
+scripts/
+  seed_wiki.py      One-time wiki scrape + index
+  seed_subtitles.py One-time subtitle index
+  discord_notify.py Post changelog to Discord
+  log_audit.py      Analyse conversations.log
+main_bot.py         Bot container entrypoint
+main_worker.py      Worker container entrypoint
+main_api.py         API container entrypoint
+docker-compose.yml
+docker-compose.dev.yml
+nats.conf
+pyproject.toml
+.env.example
 ```
 
 ---
 
 ## Environment Variables
 
-Both are required — startup raises `RuntimeError` if missing.
-
 ```
-DISCORD_TOKEN=   # Discord bot token
-GROQ_API_KEY=    # Groq API key
+DISCORD_TOKEN=          # Discord bot token
+QDRANT_API_KEY=         # Qdrant auth key (also set in docker-compose for Qdrant itself)
+GROQ_API_KEY=           # Groq API key (only when LLM_PROVIDER=groq)
+API_KEYS=               # M2M keys: "sync:key1,read:key2,admin:key3"
+LLM_PROVIDER=groq       # "groq", "ollama", or "openai" for LM Studio/OpenAI-compatible servers
+WIKI_HOST=tensura.wiki.gg
+# Set by docker-compose.yml (override only if running outside Docker):
+NATS_URL=nats://nats:4222
+QDRANT_URL=http://qdrant:6333
+OLLAMA_BASE_URL=http://ollama:11434   # only when LLM_PROVIDER=ollama
+OPENAI_BASE_URL=http://host.containers.internal:1234  # only when LLM_PROVIDER=openai
 ```
 
-Copy `.env.example` → `.env` and fill in values.
+Copy `.env.example` → `.env` and fill values.
+Generate M2M keys: `python -c "import secrets; print(secrets.token_hex(32))"`
 
 ---
 
@@ -58,38 +118,65 @@ Copy `.env.example` → `.env` and fill in values.
 ### First-time setup
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env
-# Fill in .env
-python scripts/build_index.py        # Full scrape + index (~7 min, ~836 pages)
-npm install -g pm2
-pm2 start ecosystem.config.cjs
-pm2 save && pm2 startup
+# Fill in .env (DISCORD_TOKEN, GROQ_API_KEY, QDRANT_API_KEY, API_KEYS)
+
+docker compose up -d --build
+
+# Seed wiki index (run once — ~7 min for ~1300 pages)
+docker compose run --rm api python scripts/seed_wiki.py
+
+# Seed all searchable knowledge collections from configured sources.
+# This includes the main wiki, TRBeyond docs, the Beyond Worlds modpack,
+# bundled Modrinth project metadata, and bounded bundled-mod wiki_url crawls.
+docker compose run --rm api python scripts/seed_knowledge.py
+
+# Optional: refresh only subtitles after adding .srt/.ass files
+docker compose run --rm api python scripts/seed_subtitles.py
 ```
 
 ### Daily usage
 
 ```bash
-pm2 status                           # Check bot + sync processes
-pm2 logs raphael                     # Tail bot logs
-pm2 restart raphael                  # After code changes
+docker compose ps
+docker compose logs -f bot
+docker compose logs -f worker
+docker compose restart bot worker    # after code changes
 ```
 
-### Index management
+### Sync API
 
 ```bash
-python scripts/build_index.py                # Full scrape + build
-python scripts/build_index.py --incremental  # Only changed pages (runs automatically at 03:00)
-python scripts/build_index.py --cached       # Re-index from disk cache (no API calls)
-python scripts/build_index.py --refresh      # Force re-fetch all pages
+# Incremental wiki sync
+curl -X POST http://localhost:8080/sync/wiki/incremental \
+     -H "Authorization: Bearer <sync_key>"
+
+# Check job status
+curl http://localhost:8080/sync/status/<job_id> \
+     -H "Authorization: Bearer <read_key>"
+
+# Full wiki re-index
+curl -X POST http://localhost:8080/sync/wiki \
+     -H "Authorization: Bearer <sync_key>"
+
+# Re-index subtitle files
+curl -X POST http://localhost:8080/sync/subtitles \
+     -H "Authorization: Bearer <sync_key>"
 ```
 
-### Verify index
+### Local LLM (Ollama)
 
 ```bash
-python -c "from rag.indexer import get_collection; c = get_collection(); print(len(c.get()['ids']), 'chunks indexed')"
+docker compose --profile local-llm up -d
+docker compose exec ollama ollama pull llama3.2
+# Set LLM_PROVIDER=ollama + OLLAMA_MODEL=llama3.2 in .env, then:
+docker compose restart worker
+```
+
+### Index verification
+
+```bash
+curl http://localhost:8080/stats -H "Authorization: Bearer <read_key>"
 ```
 
 ---
@@ -97,116 +184,105 @@ python -c "from rag.indexer import get_collection; c = get_collection(); print(l
 ## Architecture
 
 ```
-Discord message ("...?")
-    └── bot/events.py (on_message)
-            ├── rag/retriever.py  →  ChromaDB (data/chroma/)
-            │       └── rag/indexer.py  ←  rag/scraper.py  ←  tensura.wiki.gg
-            └── llm/client.py  (Groq API)
-                    └── llm/prompts.py  (Raphael persona + RAG prompt)
+Discord "Raphael, ..."
+  → bot/events.py on_message()
+      ├── query clean + injection check
+      ├── NATS KV rate-limit check (ratelimit bucket, TTL=6s)
+      └── publish → NATS Stream "MESSAGES"
+                         │
+              worker/consumer.py (pull consumer)
+                         │
+              worker/pipeline.py:
+                ├── NATS KV history fetch (history bucket, TTL=600s)
+                ├── rag/wiki/retriever.py → Qdrant "wiki"
+                ├── rag/addons/retriever.py → Qdrant "addons"
+                ├── rag/subtitles/retriever.py → Qdrant "subtitles"
+                ├── llm/router.py → GroqProvider or OllamaProvider
+                └── publish → NATS Stream "REPLIES"
+                         │
+      bot/replies.py (push consumer)
+          → resolves pending Future → Discord reply
+
+Wiki sync (API-triggered):
+  POST /sync/wiki → api/routes/sync.py
+      → rag/wiki/scraper.py + rag/wiki/indexer.py → Qdrant
+  POST /sync/addons → api/routes/sync.py
+      → rag/addons/scraper.py + rag/addons/indexer.py → Qdrant
 ```
 
-**PM2 processes** (`ecosystem.config.cjs`):
+---
 
-```
-pm2
-├── raphael              .venv/bin/python main.py        (Discord bot — always running)
-├── raphael-caffeinate   bash scripts/start.sh           (macOS sleep prevention — always running)
-└── raphael-sync         .venv/bin/python build_index.py  (daily wiki sync at 03:00 — one-shot)
-```
+## Qdrant Collections
+
+| Collection  | Contents              | Key payload fields                                                                              |
+| ----------- | --------------------- | ----------------------------------------------------------------------------------------------- |
+| `wiki`      | Wiki page chunks      | `text`, `page_title`, `section`, `chunk_type`, `page_category`, `page_path_segments`, `page_categories` |
+| `addons`    | External add-on docs  | `text`, `project_title`, `section`, `url`, `source_type`                                        |
+| `subtitles` | Anime dialogue chunks | `text`, `speaker`, `season`, `episode`, `is_raphael`                                           |
+
+---
+
+## M2M Authentication
+
+`API_KEYS` format: `"sync:key1,read:key2,admin:key3"`
+
+| Role    | Permissions                    |
+| ------- | ------------------------------ |
+| `sync`  | Trigger sync endpoints         |
+| `read`  | Read stats and sync status     |
+| `admin` | All of the above               |
+
+Keys validated with `hmac.compare_digest` (constant-time, no timing attacks).
 
 ---
 
 ## Code Conventions
 
-**Logging**
+**Logging:** `logging.getLogger(__name__)` — never `print()` (except seed scripts)
 
-- All modules: `logging.getLogger(__name__)` — never `print()` (except `scripts/build_index.py` CLI)
-- Format: `%(asctime)s %(levelname)s %(name)s: %(message)s`
+**Config:** All tunable values in `src/config.py` via `Settings`. Never hardcode inline.
 
-**Error handling**
+**Type hints:** All function signatures annotated with explicit return types.
 
-- Graceful degradation: 4-model fallback chain → in-character error message
-- Rate limit backoff: exponential (30s / 60s / 120s)
-- User-facing errors stay in-character: _"Insufficient data in Raphael's archives"_
+**Paths:** `pathlib.Path` everywhere.
 
-**Type hints**
-
-- All function signatures use type annotations with explicit return types
-
-**Paths**
-
-- Always `pathlib.Path`, resolved relative to `Path(__file__).parent`
-
-**Async**
-
-- Discord handlers are `async`; RAG + LLM calls run in thread pool via `run_in_executor()`
-
-**Immutability**
-
-- Return new objects; don't mutate state in-place
-
-**File size**
-
-- Keep files under 800 lines, functions under 50 lines
+**File size:** Keep files under 800 lines, functions under 50 lines.
 
 ---
 
-## Constants (don't hardcode inline)
+## Constants
 
-Key values live at module level in their respective files:
-
-| Constant              | Location           | Value                                       |
-| --------------------- | ------------------ | ------------------------------------------- |
-| `PRIMARY_MODEL`       | `llm/client.py`    | `llama-3.3-70b-versatile`                   |
-| `FALLBACK_MODEL`      | `llm/client.py`    | `qwen/qwen3-32b`                            |
-| `TERTIARY_MODEL`      | `llm/client.py`    | `meta-llama/llama-4-scout-17b-16e-instruct` |
-| `LAST_RESORT_MODEL`   | `llm/client.py`    | `llama-3.1-8b-instant`                      |
-| `MAX_TOKENS`          | `llm/client.py`    | 1024                                        |
-| `TEMPERATURE`         | `llm/client.py`    | 0.1                                         |
-| `K_FACTUAL`           | `rag/retriever.py` | 8                                           |
-| `K_COMPARATIVE`       | `rag/retriever.py` | 10                                          |
-| `RELEVANCE_THRESHOLD` | `rag/retriever.py` | 0.30                                        |
-| `CHUNK_MAX_TOKENS`    | `rag/indexer.py`   | 400                                         |
-| `MIN_CHUNK_CHARS`     | `rag/indexer.py`   | 20                                          |
-| Embedding model       | `rag/indexer.py`   | `all-MiniLM-L6-v2`                          |
+| Constant              | Location                    | Value                     |
+| --------------------- | --------------------------- | ------------------------- |
+| `PRIMARY_MODEL`       | `llm/providers/groq.py`     | `llama-3.3-70b-versatile` |
+| `FALLBACK_MODEL`      | `llm/providers/groq.py`     | `qwen/qwen3-32b`          |
+| `MAX_TOKENS`          | `llm/router.py`             | `1024`                    |
+| `TEMPERATURE`         | `llm/router.py`             | `0.1`                     |
+| `K_FACTUAL`           | `config.py`                 | `8`                       |
+| `K_COMPARATIVE`       | `config.py`                 | `10`                      |
+| `RELEVANCE_THRESHOLD` | `config.py`                 | `0.30`                    |
+| `CHUNK_MAX_TOKENS`    | `rag/wiki/cleaner.py`       | `400`                     |
+| Embedding model       | `config.py`                 | `all-MiniLM-L6-v2`        |
 
 ---
 
 ## Testing
 
-No test suite exists yet. Manual verification only (see index verify command above).
+```bash
+docker compose run --rm worker pytest tests/
+```
 
-When adding tests: use pytest, target 80% coverage, write tests first (TDD).
+Tests need updating for the new architecture. When adding tests: use pytest, target 80% coverage, write tests first (TDD).
 
 ---
 
 ## Bot Restart Policy
 
-After any change that affects output — prompts, speech patterns, retrieval logic, LLM parameters, response formatting, or event handling — **always restart the bot before considering the task done:**
+After any change that affects output:
 
 ```bash
-pm2 restart raphael
+docker compose restart worker bot
 ```
-
-Do not leave the old process running with stale code. If pm2 is not running, note it to the user.
-
----
-
-## Automated Pipeline
-
-**Hook (automatic):**
-
-| Trigger                      | What fires                             | Discord message                                   |
-| ---------------------------- | -------------------------------------- | ------------------------------------------------- |
-| Linear issue marked **Done** | `PostToolUse: mcp__linear__save_issue` | One-liner task notice with Groq-generated summary |
-
-**Manual (Claude does this after every `git push`):**
-
-After pushing, compose a categorised changelog (Added/Updated/Fixed) and send it via `post_discord()` from `scripts/discord_notify.py`. This produces higher-quality changelogs than automated commit-message parsing.
-
-Both post to channel `1488606233807028275`.
-
-Hooks are configured in `.claude/settings.local.json` (machine-specific, not committed).
 
 ---
 
@@ -216,45 +292,27 @@ Tasks and ideas are tracked in **Linear** under the **Tensura** team, project **
 
 **MANDATORY — no exceptions:**
 
-- Every bug, idea, improvement, fix, or task that comes up in conversation gets a Linear issue immediately — before any code is written.
-- When starting work on an issue, set its status to **In Progress**.
-- When finishing, mark it **Done**.
-- Do not batch issues up for later. Create them the moment they are identified.
+- Every bug, idea, improvement, fix, or task gets a Linear issue immediately — before any code is written.
+- When starting work, set status to **In Progress**. When finishing, mark **Done**.
 
-**Milestone placement — think before assigning:**
-
-Every issue must be placed in the correct milestone. Use the existing milestones as a guide:
+**Milestone placement:**
 
 | Milestone                    | What belongs here                                               |
 | ---------------------------- | --------------------------------------------------------------- |
 | Phase 0 — Setup Cleanup      | Tooling, CI, config, dependency hygiene, infra housekeeping     |
-| Phase 1 — RAG Infrastructure | Core scraping, indexing, chunking, ChromaDB wiring              |
+| Phase 1 — RAG Infrastructure | Core scraping, indexing, chunking, Qdrant wiring                |
 | Phase 2 — Hardening          | Reliability, rate limits, error handling, async safety          |
 | Phase 2 — Simple Recitation  | Bot responds correctly to basic factual questions               |
-| Phase 2 — Answer Quality     | Retrieval quality bugs: wrong chunks, missing data, bad scoring |
+| Phase 2 — Answer Quality     | Retrieval quality bugs                                          |
 | Phase 3 — Advanced Reasoning | Enumeration queries, comparisons, multi-entity reasoning        |
-| Phase 4 — Chatbot Persona    | Persona polish, fallback behaviour, non-wiki questions          |
+| Phase 4 — Chatbot Persona    | Persona polish, subtitle grounding, non-wiki questions          |
 
-Rules:
+**Labels:** Apply type (`Bug`, `Feature`, `Improvement`) AND component (`Bot`, `LLM`, `RAG`, `Infrastructure`, `Testing`).
 
-- If the issue is a bugfix to an existing feature, place it in the same milestone as the original feature.
-- If no existing milestone fits, create a new one first — don't leave issues unassigned or in the wrong phase.
-- A feature that requires new retrieval logic (e.g. "list all X", "compare X vs Y") belongs in Phase 3, not Phase 2 — even if triggered by a Phase 2 bug report.
+---
 
-**Labels — always apply at least one:**
+## Automated Pipeline
 
-| Label            | When to use                                                    |
-| ---------------- | -------------------------------------------------------------- |
-| `Bug`            | Something is broken or behaves incorrectly                     |
-| `Feature`        | New capability that doesn't exist yet                          |
-| `Improvement`    | Enhancement to existing behaviour (refactor, optimisation, UX) |
-| `Bot`            | Discord event handling, response formatting, user interaction  |
-| `LLM`            | Prompts, Groq API, model routing, fallback logic               |
-| `RAG`            | Scraper, indexer, retriever, ChromaDB                          |
-| `Infrastructure` | PM2, cron, tooling, deployment, project setup                  |
-| `Testing`        | Test coverage, QA, verification                                |
+**Manual (after every `git push`):**
 
-Rules:
-
-- Apply the _type_ label (`Bug`, `Feature`, or `Improvement`) AND the _component_ label (`Bot`, `LLM`, `RAG`, `Infrastructure`, `Testing`) where applicable.
-- A single issue can and should carry multiple labels (e.g. a retrieval bug gets `Bug` + `RAG`).
+Compose a categorised changelog (Added/Updated/Fixed) and send via `post_discord()` in `scripts/discord_notify.py`. Posts to channel `1488606233807028275`.
