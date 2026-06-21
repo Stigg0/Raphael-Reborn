@@ -8,8 +8,7 @@ from nats.js.errors import KeyNotFoundError
 from qdrant_client import QdrantClient
 
 from llm.router import LLMRouter
-from messaging.security import sign_payload
-from messaging.streams import KV_HISTORY, REPLIES_SUBJECT, get_kv
+from messaging.streams import KV_HISTORY, REPLIES_SUBJECT, get_kv, publish_signed
 from rag.addons.retriever import query as addons_query
 from rag.reranker import rerank
 from rag.subtitles.retriever import query_lore, query_persona
@@ -155,7 +154,6 @@ async def process_event(
         "chunks_used": len(chunks),
         "latency_ms": latency_ms,
     }
-    js = nc.jetstream()
-    await js.publish(REPLIES_SUBJECT, sign_payload(reply, "worker", message_hmac_key))
+    await publish_signed(nc, REPLIES_SUBJECT, reply, "worker", message_hmac_key)
 
     await _store_history(nc, user_id, question, response, history, max_history_pairs)

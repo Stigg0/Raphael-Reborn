@@ -1,0 +1,29 @@
+# Automated dependency + base-image update PRs, with security advisories
+# surfaced as soon as they are published. Pairs with the >= ranges in
+# pyproject.toml: Dependabot proposes the concrete bumps and flags CVEs.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "Infrastructure"
+      - "Improvement"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/docker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "Infrastructure"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "Infrastructure"

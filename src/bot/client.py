@@ -29,7 +29,13 @@ async def run(settings: Settings) -> None:
 
     intents = discord.Intents.default()
     intents.message_content = True
-    client = discord.Client(intents=intents)
+    # Never honour @everyone/@here/role/user mentions emitted in bot output.
+    # Reply text is LLM-generated from untrusted RAG content, so a prompt
+    # injection (or a crafted question) must not be able to trigger a mass ping.
+    client = discord.Client(
+        intents=intents,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
     setup_events(
         client,

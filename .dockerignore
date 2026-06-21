@@ -1,0 +1,26 @@
+# Keep secrets, local state, and VCS metadata out of the build context so they
+# can never be baked into an image (the Dockerfiles already COPY selectively;
+# this is defense in depth).
+.env
+.env.*
+!.env.example
+certs/
+data/
+subtitles/
+
+.git/
+.gitignore
+.github/
+.worktrees/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+tests/
+.claude/
+.DS_Store
+*.log

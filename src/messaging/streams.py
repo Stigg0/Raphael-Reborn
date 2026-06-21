@@ -3,6 +3,7 @@
 All stream/bucket names live here so bot, worker, and api share the same
 constants without coupling their implementations to each other.
 """
+import json
 import logging
 
 from nats.aio.client import Client as NATSClient
@@ -17,7 +18,14 @@ from nats.js.api import (
 from nats.js.errors import NotFoundError
 from nats.js.kv import KeyValue
 
+from messaging.security import sign_payload
+
 logger = logging.getLogger(__name__)
+
+# Server-side de-dup window for JetStream publishes. Must cover the signed
+# envelope's accepted clock-skew window so a captured envelope cannot be
+# re-published (replayed) inside its validity period. See messaging/security.py.
+_DUPLICATE_WINDOW_SECONDS = 120
 
 # ── Stream names ──────────────────────────────────────────────────────────────
 MESSAGES_STREAM = "MESSAGES"
@@ -51,7 +59,7 @@ async def ensure_streams(nc: NATSClient) -> None:
                     retention=RetentionPolicy.WORK_QUEUE,
                     storage=StorageType.FILE,
                     max_age=3600,          # 1 h — unprocessed messages expire
-                    duplicate_window=60,   # de-dupe within 60 s
+                    duplicate_window=_DUPLICATE_WINDOW_SECONDS,
                 )
             )
             logger.info("Created stream %r", name)
@@ -77,3 +85,18 @@ async def ensure_kv(nc: NATSClient, cooldown_seconds: int, history_ttl_seconds: 
 
 async def get_kv(nc: NATSClient, bucket: str) -> KeyValue:
     return await nc.jetstream().key_value(bucket)
+
+
+async def publish_signed(
+    nc: NATSClient, subject: str, payload: dict, issuer: str, secret: str
+) -> None:
+    """Publish a signed envelope, using its nonce as the JetStream de-dup id.
+
+    Setting ``Nats-Msg-Id`` lets the server reject a replayed re-publish of the
+    same captured envelope within ``duplicate_window``. This does not interfere
+    with normal consumer redelivery, which re-delivers the already-stored message
+    rather than publishing a new one.
+    """
+    data = sign_payload(payload, issuer, secret)
+    nonce = json.loads(data)["nonce"]
+    await nc.jetstream().publish(subject, data, headers={"Nats-Msg-Id": nonce})

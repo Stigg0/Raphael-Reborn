@@ -12,11 +12,10 @@ import time
 
 import discord
 from nats.aio.client import Client as NATSClient
-from nats.js.errors import KeyNotFoundError
+from nats.js.errors import KeyWrongLastSequenceError
 
 from bot.formatter import DISCORD_LIMIT, chunk_response
-from messaging.streams import KV_RATELIMIT, MESSAGES_SUBJECT, get_kv
-from messaging.security import sign_payload
+from messaging.streams import KV_RATELIMIT, MESSAGES_SUBJECT, get_kv, publish_signed
 
 logger = logging.getLogger(__name__)
 
@@ -116,22 +115,19 @@ def setup_events(
             return
 
         uid = str(message.author.id)
+        # Atomic cooldown gate: kv.create writes the key only if it does not
+        # already exist, so two messages racing in the same instant cannot both
+        # pass (no check-then-set TOCTOU). The bucket-level TTL (= cooldown_seconds)
+        # expires the key automatically.
         try:
             kv = await get_kv(nc, KV_RATELIMIT)
-            await kv.get(f"user.{uid}")
-            # Key exists → still on cooldown
+            await kv.create(f"user.{uid}", b"1")
+        except KeyWrongLastSequenceError:
+            # Key already present → user is still within the cooldown window.
             return
-        except KeyNotFoundError:
-            pass
         except Exception as exc:
+            # Fail open on infrastructure errors so a KV outage cannot mute the bot.
             logger.warning("Rate limit KV check failed: %s", exc)
-
-        # Set rate limit key (TTL is set at bucket level = cooldown_seconds)
-        try:
-            kv = await get_kv(nc, KV_RATELIMIT)
-            await kv.put(f"user.{uid}", b"1")
-        except Exception as exc:
-            logger.warning("Rate limit KV set failed: %s", exc)
 
         message_id = str(message.id)
         channel_id = str(message.channel.id)
@@ -153,8 +149,7 @@ def setup_events(
 
         try:
             await message.add_reaction("⏳")
-            js = nc.jetstream()
-            await js.publish(MESSAGES_SUBJECT, sign_payload(payload, "bot", message_hmac_key))
+            await publish_signed(nc, MESSAGES_SUBJECT, payload, "bot", message_hmac_key)
         except Exception as exc:
             logger.exception("Failed to publish message event: %s", exc)
             await message.channel.send(_ERROR_RESPONSE)

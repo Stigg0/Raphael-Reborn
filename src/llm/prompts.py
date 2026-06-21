@@ -72,6 +72,10 @@ _CHUNK_INJECTION_RE = re.compile(
     r"(instruction|prompt|system|rule|above|previous)",
     re.IGNORECASE,
 )
+# Neutralise Discord mass-mention tokens in any text that reaches the model,
+# so they cannot be echoed back into a reply. Outbound mentions are also
+# disabled at the client level (see bot/client.py); this is defense in depth.
+_MASS_MENTION_RE = re.compile(r"@(everyone|here)", re.IGNORECASE)
 _LOW_CONFIDENCE_THRESHOLD = 0.75
 _TECHNICAL_DETAIL_RE = re.compile(
     r"\b(?:setup|configure|configuration|config|port|ports|udp|proxy|server|"
@@ -88,7 +92,9 @@ _OVERVIEW_RE = re.compile(
 
 
 def _sanitize_chunk(text: str) -> str:
-    return _CHUNK_INJECTION_RE.sub("[redacted]", text)
+    text = _CHUNK_INJECTION_RE.sub("[redacted]", text)
+    # Insert a zero-width space so "@everyone"/"@here" can never resolve.
+    return _MASS_MENTION_RE.sub("@\u200b\\1", text)
 
 
 def _answer_depth_hint(question: str) -> str:

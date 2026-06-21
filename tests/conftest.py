@@ -2,8 +2,12 @@
 import sys
 from pathlib import Path
 
-# Ensure project root is importable
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Application code lives under src/ (the services run with PYTHONPATH=/app/src);
+# scripts/ live at the repo root. Put both on sys.path so tests import the exact
+# same modules the running services do.
+_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
 
 
 def pytest_addoption(parser):

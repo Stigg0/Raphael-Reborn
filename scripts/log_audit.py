@@ -10,9 +10,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-from rag.retriever import _normalize_query, _bare_entity_name  # noqa: E402
+from rag.wiki.normalizer import normalize_query  # noqa: E402
+from rag.wiki.retriever import _bare_entity_name  # noqa: E402
 
 LOG_PATH = ROOT / "data" / "conversations.log"
 CURSOR_PATH = ROOT / "data" / ".log-audit-cursor"
@@ -165,7 +166,7 @@ def main() -> None:
     # --- Check 1: Normalization mismatch ---
     norm_changes: list[dict] = []
     for e in entries:
-        normalized = _normalize_query(e["cleaned"])
+        normalized = normalize_query(e["cleaned"])
         if normalized != e["cleaned"]:
             e["normalized"] = normalized
             ents = key_entities(normalized)

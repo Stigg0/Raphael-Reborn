@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
-import requests
+from rag.safe_http import safe_get
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def _scrape_modrinth_project(
         return json.loads(path.read_text(encoding="utf-8"))
 
     headers = {"User-Agent": _USER_AGENT}
-    project_resp = requests.get(
+    project_resp = safe_get(
         f"https://api.modrinth.com/v2/project/{slug}",
         headers=headers,
         timeout=_DEFAULT_TIMEOUT,
@@ -154,7 +154,7 @@ def _scrape_modrinth_project(
     project_resp.raise_for_status()
     project = project_resp.json()
 
-    versions_resp = requests.get(
+    versions_resp = safe_get(
         f"https://api.modrinth.com/v2/project/{slug}/version",
         headers=headers,
         timeout=_DEFAULT_TIMEOUT,
@@ -236,7 +236,7 @@ def _latest_modpack_file(versions: list[dict]) -> dict | None:
 
 
 def _project_ids_from_mrpack(file_info: dict, headers: dict[str, str]) -> list[str]:
-    resp = requests.get(file_info["url"], headers=headers, timeout=_DEFAULT_TIMEOUT)
+    resp = safe_get(file_info["url"], headers=headers, timeout=_DEFAULT_TIMEOUT)
     resp.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
@@ -279,7 +279,7 @@ def _scrape_modrinth_modpack_projects(
     sections = []
     for project_id in project_ids:
         try:
-            resp = requests.get(
+            resp = safe_get(
                 f"https://api.modrinth.com/v2/project/{project_id}",
                 headers=headers,
                 timeout=_DEFAULT_TIMEOUT,
@@ -410,7 +410,7 @@ def _scrape_mod_wiki_sections(
             continue
         seen.add(url)
         try:
-            resp = requests.get(url, headers=headers, timeout=_DEFAULT_TIMEOUT)
+            resp = safe_get(url, headers=headers, timeout=_DEFAULT_TIMEOUT)
             resp.raise_for_status()
         except Exception as exc:
             logger.debug("Failed to fetch wiki page for %s (%s): %s", mod_title, url, exc)
@@ -530,7 +530,7 @@ def _linked_script_text(url: str, html: str) -> str:
     for src in _SCRIPT_RE.findall(html):
         script_url = urljoin(url, src)
         try:
-            resp = requests.get(script_url, headers={"User-Agent": _USER_AGENT}, timeout=_DEFAULT_TIMEOUT)
+            resp = safe_get(script_url, headers={"User-Agent": _USER_AGENT}, timeout=_DEFAULT_TIMEOUT)
             resp.raise_for_status()
         except Exception as exc:
             logger.debug("Failed to fetch linked script %s: %s", script_url, exc)
@@ -612,7 +612,7 @@ def scrape_addon_url(url: str, force_refresh: bool = False, mod_wiki_max_pages: 
     if path.exists() and not force_refresh:
         return json.loads(path.read_text(encoding="utf-8"))
 
-    resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=_DEFAULT_TIMEOUT)
+    resp = safe_get(url, headers={"User-Agent": _USER_AGENT}, timeout=_DEFAULT_TIMEOUT)
     resp.raise_for_status()
     head_title, meta_lines = _head_metadata(resp.text)
     parser = _ReadableHTMLParser()

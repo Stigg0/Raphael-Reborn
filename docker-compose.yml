@@ -158,7 +158,11 @@ services:
       HISTORY_TTL_SECONDS: "${HISTORY_TTL_SECONDS:-600}"
       SUBDL_API_KEY: "${SUBDL_API_KEY:-}"
     ports:
-      - "8080:8080"
+      # Bind the management/sync API to loopback only by default. Other
+      # containers reach it via the internal Docker network (service name),
+      # which does not traverse this published port. Override API_BIND_HOST
+      # (e.g. to a private interface) only behind TLS + the M2M keys.
+      - "${API_BIND_HOST:-127.0.0.1}:8080:8080"
     depends_on:
       nats:
         condition: service_healthy
@@ -169,6 +173,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp
     cap_drop:
       - ALL
     security_opt:
