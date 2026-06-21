@@ -4,8 +4,12 @@ services:
     restart: unless-stopped
     user: "10001:10001"
     environment:
+      QDRANT__SERVICE__ENABLE_TLS: "true"
+      QDRANT__TLS__CERT: /qdrant/tls/server.pem
+      QDRANT__TLS__KEY: /qdrant/tls/server-key.pem
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
     volumes:
+      - ./certs/qdrant:/qdrant/tls:ro,z
       - qdrant_data:/qdrant/storage
       - qdrant_snapshots:/qdrant/snapshots
     read_only: true
@@ -28,11 +32,11 @@ services:
     command: ["--config", "/etc/nats/nats.conf"]
     environment:
       NATS_BOT_USER: "${NATS_BOT_USER}"
-      NATS_BOT_PASSWORD: "${NATS_BOT_PASSWORD}"
+      NATS_BOT_PASSWORD_BCRYPT: "${NATS_BOT_PASSWORD_BCRYPT}"
       NATS_WORKER_USER: "${NATS_WORKER_USER}"
-      NATS_WORKER_PASSWORD: "${NATS_WORKER_PASSWORD}"
+      NATS_WORKER_PASSWORD_BCRYPT: "${NATS_WORKER_PASSWORD_BCRYPT}"
       NATS_API_USER: "${NATS_API_USER}"
-      NATS_API_PASSWORD: "${NATS_API_PASSWORD}"
+      NATS_API_PASSWORD_BCRYPT: "${NATS_API_PASSWORD_BCRYPT}"
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro,z
       - nats_data:/data
@@ -85,8 +89,9 @@ services:
     environment:
       NATS_URL: "nats://${NATS_WORKER_USER}:${NATS_WORKER_PASSWORD}@nats:4222"
       NATS_MESSAGE_HMAC_KEY: "${NATS_MESSAGE_HMAC_KEY}"
-      QDRANT_URL: "http://qdrant:6333"
+      QDRANT_URL: "https://qdrant:6333"
       QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      QDRANT_TLS_CA_CERT: "/app/certs/qdrant/ca.pem"
       LLM_PROVIDER: "${LLM_PROVIDER:-groq}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
@@ -126,6 +131,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    volumes:
+      - ./certs/qdrant:/app/certs/qdrant:ro,z
 
   api:
     build:
@@ -134,8 +141,9 @@ services:
     restart: unless-stopped
     environment:
       NATS_URL: "nats://${NATS_API_USER}:${NATS_API_PASSWORD}@nats:4222"
-      QDRANT_URL: "http://qdrant:6333"
+      QDRANT_URL: "https://qdrant:6333"
       QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      QDRANT_TLS_CA_CERT: "/app/certs/qdrant/ca.pem"
       API_KEYS: "${API_KEYS}"
       WIKI_HOST: "${WIKI_HOST:-tensura.wiki.gg}"
       WIKI_COLLECTION: "${WIKI_COLLECTION:-wiki}"
@@ -171,6 +179,7 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
+      - ./certs/qdrant:/app/certs/qdrant:ro,z
       - ./subtitles:/app/subtitles:z
       - page_cache:/app/data/pages
       - addon_cache:/app/data/addons

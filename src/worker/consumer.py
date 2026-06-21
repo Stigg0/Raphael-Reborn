@@ -44,7 +44,7 @@ async def run(settings: Settings) -> None:
     )
     logger.info("Pull consumer ready on stream %r", MESSAGES_STREAM)
 
-    qdrant = get_client(settings.qdrant_url, settings.qdrant_api_key)
+    qdrant = get_client(settings.qdrant_url, settings.qdrant_api_key, settings.qdrant_tls_ca_cert)
     provider = build_provider(
         settings.llm_provider,
         settings.groq_api_key,

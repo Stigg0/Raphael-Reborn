@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Qdrant
     qdrant_url: str = "http://qdrant:6333"
     qdrant_api_key: str = ""
+    qdrant_tls_ca_cert: str = ""
 
     # LLM
     llm_provider: Literal["groq", "ollama", "openai"] = "groq"

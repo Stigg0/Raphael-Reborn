@@ -48,7 +48,7 @@ def create_app() -> FastAPI:
         except NotFoundError:
             await js.create_key_value(KeyValueConfig(bucket="sync_status", ttl=86400))
 
-        _qdrant = get_client(settings.qdrant_url, settings.qdrant_api_key)
+        _qdrant = get_client(settings.qdrant_url, settings.qdrant_api_key, settings.qdrant_tls_ca_cert)
         app.state.qdrant = _qdrant
         logger.info("API connected to Qdrant")
 

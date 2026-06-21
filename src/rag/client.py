@@ -18,14 +18,21 @@ _lock = threading.Lock()
 _instance: QdrantClient | None = None
 
 
-def get_client(url: str, api_key: str) -> QdrantClient:
+def get_client(url: str, api_key: str, tls_ca_cert: str = "") -> QdrantClient:
     """Return the shared Qdrant client singleton."""
     global _instance
     if _instance is not None:
         return _instance
     with _lock:
         if _instance is None:
-            _instance = QdrantClient(url=url, api_key=api_key, timeout=30)
+            kwargs = {"verify": tls_ca_cert} if tls_ca_cert else {}
+            _instance = QdrantClient(
+                url=url,
+                api_key=api_key,
+                timeout=30,
+                check_compatibility=False,
+                **kwargs,
+            )
             logger.info("Qdrant client connected to %s", url)
     return _instance
 
