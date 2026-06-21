@@ -2,18 +2,18 @@
 resolves pending Discord-message futures so events.py can send the reply.
 """
 import asyncio
-import json
 import logging
 
 import discord
 from nats.aio.client import Client as NATSClient
 
+from messaging.security import MessageAuthError, verify_payload
 from messaging.streams import REPLIES_STREAM, REPLIES_SUBJECT
 
 logger = logging.getLogger(__name__)
 
 
-async def start_reply_consumer(client: discord.Client, nc: NATSClient) -> None:
+async def start_reply_consumer(client: discord.Client, nc: NATSClient, message_hmac_key: str) -> None:
     """Subscribe to events.replies; resolve pending futures or log orphans."""
     js = nc.jetstream()
     sub = await js.subscribe(REPLIES_SUBJECT, durable="bot-replies", stream=REPLIES_STREAM)
@@ -21,8 +21,12 @@ async def start_reply_consumer(client: discord.Client, nc: NATSClient) -> None:
 
     async for msg in sub.messages:
         try:
-            data = json.loads(msg.data)
+            data = verify_payload(msg.data, "worker", message_hmac_key)
             await msg.ack()
+        except MessageAuthError as exc:
+            logger.warning("Rejected unsigned or invalid worker reply: %s", exc)
+            await msg.ack()
+            continue
         except Exception as exc:
             logger.warning("Failed to decode reply message: %s", exc)
             await msg.nak()

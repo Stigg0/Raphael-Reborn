@@ -59,6 +59,8 @@ _WHAT_IS_RE = re.compile(
 _MODPACK_CONTEXT_RE = re.compile(
     r"\b(?:minecraft|modpack|modpacks?|mods?|modded|fabric|forge|quilt|"
     r"curseforge|modrinth|tensura|slime|rimuru|raphael|tr\s*beyond|"
+    r"anime|show|episode|season|scene|plot|story|dialogue|manga|light\s+novel|"
+    r"tempest|jura|veldora|milim|shion|shuna|benimaru|gobta|diablo|hinata|"
     r"beyond\s+worlds|tensura\s*:?\s*reincarnated|dungeon|server|"
     r"wiki|craft|recipe|recipes|item|items|block|blocks|mob|mobs|"
     r"race|races|skill|skills|magic|spells?|biome|structure|boss|"
@@ -116,11 +118,20 @@ class LLMRouter:
         question: str,
         wiki_chunks: list[dict],
         subtitle_persona_chunks: list[dict],
+        subtitle_lore_chunks: list[dict] | None = None,
         history: list[tuple[str, str]] | None = None,
+        response_char_limit: int = 0,
     ) -> tuple[str, str]:
         """Generate a Raphael-persona answer. Returns (response_text, model_id)."""
         self._set_web_search_allowed(question, wiki_chunks)
-        user_message = build_rag_prompt(question, wiki_chunks, subtitle_persona_chunks, history)
+        user_message = build_rag_prompt(
+            question,
+            wiki_chunks,
+            subtitle_persona_chunks,
+            subtitle_lore_chunks=subtitle_lore_chunks,
+            history=history,
+            response_char_limit=response_char_limit,
+        )
         try:
             response = self._provider.complete(
                 system_prompt=RAPHAEL_SYSTEM_PROMPT,

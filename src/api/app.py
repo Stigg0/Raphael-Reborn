@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 import nats
 from fastapi import FastAPI
@@ -18,6 +19,13 @@ _nc: NATSClient | None = None
 _qdrant: QdrantClient | None = None
 
 
+def _redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit((parsed.scheme, f"***@{parsed.netloc.rsplit('@', 1)[1]}", parsed.path, parsed.query, parsed.fragment))
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Raphael API", docs_url=None, redoc_url=None)
 
@@ -27,7 +35,7 @@ def create_app() -> FastAPI:
         settings = get_settings()
 
         _nc = await nats.connect(settings.nats_url)
-        logger.info("API connected to NATS")
+        logger.info("API connected to NATS at %s", _redact_url(settings.nats_url))
         await ensure_streams(_nc)
         await ensure_kv(_nc, settings.cooldown_seconds, settings.history_ttl_seconds)
 

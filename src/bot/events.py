@@ -6,7 +6,6 @@ task (replies.py) that subscribes to the REPLIES stream and sends responses back
 to Discord.
 """
 import asyncio
-import json
 import logging
 import re
 import time
@@ -15,7 +14,9 @@ import discord
 from nats.aio.client import Client as NATSClient
 from nats.js.errors import KeyNotFoundError
 
+from bot.formatter import DISCORD_LIMIT, chunk_response
 from messaging.streams import KV_RATELIMIT, MESSAGES_SUBJECT, get_kv
+from messaging.security import sign_payload
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,22 @@ def _clean_query(raw: str) -> str | None:
     return cleaned
 
 
-def setup_events(client: discord.Client, nc: NATSClient, cooldown_seconds: int) -> None:
+def _truncate_for_channel(text: str, char_limit: int) -> str:
+    if char_limit <= 0 or len(text) <= char_limit:
+        return text
+    if char_limit <= 3:
+        return text[:char_limit]
+    return text[:char_limit - 3].rstrip() + "..."
+
+
+def setup_events(
+    client: discord.Client,
+    nc: NATSClient,
+    cooldown_seconds: int,
+    message_hmac_key: str,
+    short_response_channel_id: str = "",
+    short_response_char_limit: int = 0,
+) -> None:
     # pending[message_id] → asyncio.Future[str]
     pending: dict[str, asyncio.Future[str]] = {}
 
@@ -118,20 +134,27 @@ def setup_events(client: discord.Client, nc: NATSClient, cooldown_seconds: int) 
             logger.warning("Rate limit KV set failed: %s", exc)
 
         message_id = str(message.id)
-        payload = json.dumps({
+        channel_id = str(message.channel.id)
+        response_char_limit = (
+            min(short_response_char_limit, DISCORD_LIMIT)
+            if short_response_channel_id and channel_id == short_response_channel_id and short_response_char_limit > 0
+            else 0
+        )
+        payload = {
             "message_id": message_id,
             "user_id": uid,
-            "channel_id": str(message.channel.id),
+            "channel_id": channel_id,
             "guild_id": str(message.guild.id) if message.guild else "",
             "content": content,
             "raw_content": raw,
+            "response_char_limit": response_char_limit,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }).encode()
+        }
 
         try:
             await message.add_reaction("⏳")
             js = nc.jetstream()
-            await js.publish(MESSAGES_SUBJECT, payload)
+            await js.publish(MESSAGES_SUBJECT, sign_payload(payload, "bot", message_hmac_key))
         except Exception as exc:
             logger.exception("Failed to publish message event: %s", exc)
             await message.channel.send(_ERROR_RESPONSE)
@@ -155,10 +178,14 @@ def setup_events(client: discord.Client, nc: NATSClient, cooldown_seconds: int) 
         except Exception:
             pass
 
-        from bot.formatter import chunk_response
-        parts = chunk_response(reply_text)
+        if response_char_limit > 0:
+            reply_text = _truncate_for_channel(reply_text, response_char_limit)
+            parts = [reply_text] if reply_text else []
+        else:
+            parts = chunk_response(reply_text)
         if parts:
-            parts = parts[:-1] + [parts[-1] + _WIP_DISCLAIMER]
+            if response_char_limit <= 0:
+                parts = parts[:-1] + [parts[-1] + _WIP_DISCLAIMER]
             await message.reply(parts[0], mention_author=False)
             for part in parts[1:]:
                 await message.channel.send(part)

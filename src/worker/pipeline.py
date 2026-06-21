@@ -8,6 +8,7 @@ from nats.js.errors import KeyNotFoundError
 from qdrant_client import QdrantClient
 
 from llm.router import LLMRouter
+from messaging.security import sign_payload
 from messaging.streams import KV_HISTORY, REPLIES_SUBJECT, get_kv
 from rag.addons.retriever import query as addons_query
 from rag.reranker import rerank
@@ -18,6 +19,22 @@ from rag.wiki.supplemental import answer_supplemental_fact
 logger = logging.getLogger(__name__)
 
 _MEMORY_SUMMARY_LEN = 120
+
+
+def _coerce_response_limit(value: object) -> int:
+    try:
+        limit = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, limit)
+
+
+def _truncate_response(text: str, char_limit: int) -> str:
+    if char_limit <= 0 or len(text) <= char_limit:
+        return text
+    if char_limit <= 3:
+        return text[:char_limit]
+    return text[:char_limit - 3].rstrip() + "..."
 
 
 async def _get_history(nc: NATSClient, user_id: str, max_pairs: int) -> list[tuple[str, str]]:
@@ -62,12 +79,14 @@ async def process_event(
     max_history_pairs: int,
     rerank_model: str = "",
     rerank_top_k: int = 5,
+    message_hmac_key: str = "",
 ) -> None:
     """Run the full pipeline for one message event and publish the reply."""
     t_start = time.monotonic()
     message_id = event["message_id"]
     user_id = event["user_id"]
     question = event["content"]
+    response_char_limit = _coerce_response_limit(event.get("response_char_limit", 0))
 
     history = await _get_history(nc, user_id, max_history_pairs)
 
@@ -107,13 +126,20 @@ async def process_event(
             persona_chunks = query_persona(qdrant, subtitles_collection, question, embed_model)
         except Exception:
             persona_chunks = []
+        try:
+            subtitle_lore_chunks = query_lore(qdrant, subtitles_collection, question, embed_model)
+        except Exception:
+            subtitle_lore_chunks = []
 
         response, model_used = router.answer(
             question=question,
             wiki_chunks=chunks,
             subtitle_persona_chunks=persona_chunks,
+            subtitle_lore_chunks=subtitle_lore_chunks,
             history=history or None,
+            response_char_limit=response_char_limit,
         )
+    response = _truncate_response(response, response_char_limit)
 
     latency_ms = int((time.monotonic() - t_start) * 1000)
     logger.info(
@@ -121,15 +147,15 @@ async def process_event(
         message_id, user_id, len(chunks), model_used, latency_ms,
     )
 
-    reply = json.dumps({
+    reply = {
         "message_id": message_id,
         "channel_id": event.get("channel_id", ""),
         "text": response,
         "model_used": model_used,
         "chunks_used": len(chunks),
         "latency_ms": latency_ms,
-    }).encode()
+    }
     js = nc.jetstream()
-    await js.publish(REPLIES_SUBJECT, reply)
+    await js.publish(REPLIES_SUBJECT, sign_payload(reply, "worker", message_hmac_key))
 
     await _store_history(nc, user_id, question, response, history, max_history_pairs)

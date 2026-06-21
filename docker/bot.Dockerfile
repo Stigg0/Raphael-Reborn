@@ -3,6 +3,7 @@ FROM python:3.12-slim AS base
 WORKDIR /app
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 RUN pip install --no-cache-dir --upgrade pip
 
@@ -14,6 +15,10 @@ COPY src/auth/ src/auth/
 COPY src/messaging/ src/messaging/
 COPY src/bot/ src/bot/
 COPY main_bot.py .
+
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app /home/appuser
+USER appuser
 
 FROM base AS dev
 # dev stage: source is volume-mounted, nothing extra needed

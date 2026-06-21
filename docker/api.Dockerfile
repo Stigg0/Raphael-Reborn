@@ -3,6 +3,9 @@ FROM python:3.12-slim AS base
 WORKDIR /app
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HOME=/tmp/huggingface
+ENV TRANSFORMERS_CACHE=/tmp/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -28,6 +31,11 @@ COPY src/rag/ src/rag/
 COPY src/api/ src/api/
 COPY scripts/ scripts/
 COPY main_api.py .
+
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data/pages /app/data/addons /app/subtitles \
+    && chown -R appuser:appuser /app /home/appuser
+USER appuser
 
 FROM base AS dev
 

@@ -3,6 +3,9 @@ FROM python:3.12-slim AS base
 WORKDIR /app
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HF_HOME=/tmp/huggingface
+ENV TRANSFORMERS_CACHE=/tmp/huggingface
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -28,6 +31,10 @@ COPY src/llm/ src/llm/
 COPY src/rag/ src/rag/
 COPY src/worker/ src/worker/
 COPY main_worker.py .
+
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app /home/appuser
+USER appuser
 
 FROM base AS dev
 

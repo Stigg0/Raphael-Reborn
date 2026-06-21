@@ -10,14 +10,15 @@ class Settings(BaseSettings):
     )
 
     # Discord
-    discord_token: str
+    discord_token: str = ""
 
     # NATS JetStream
     nats_url: str = "nats://nats:4222"
+    nats_message_hmac_key: str = ""
 
     # Qdrant
     qdrant_url: str = "http://qdrant:6333"
-    qdrant_api_key: str
+    qdrant_api_key: str = ""
 
     # LLM
     llm_provider: Literal["groq", "ollama", "openai"] = "groq"
@@ -70,6 +71,8 @@ class Settings(BaseSettings):
     cooldown_seconds: int = 6
     history_ttl_seconds: int = 600
     max_history_pairs: int = 3
+    short_response_channel_id: str = ""
+    short_response_char_limit: int = 0
 
 
 

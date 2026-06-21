@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import signal
+from urllib.parse import urlsplit, urlunsplit
 
 import discord
 import nats
@@ -11,23 +12,33 @@ from nats.aio.client import Client as NATSClient
 from bot.events import setup_events
 from bot.replies import start_reply_consumer
 from config import Settings
-from messaging.streams import ensure_kv, ensure_streams
 
 logger = logging.getLogger(__name__)
 
 
+def _redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit((parsed.scheme, f"***@{parsed.netloc.rsplit('@', 1)[1]}", parsed.path, parsed.query, parsed.fragment))
+
+
 async def run(settings: Settings) -> None:
     nc: NATSClient = await nats.connect(settings.nats_url)
-    logger.info("Connected to NATS at %s", settings.nats_url)
-
-    await ensure_streams(nc)
-    await ensure_kv(nc, settings.cooldown_seconds, settings.history_ttl_seconds)
+    logger.info("Connected to NATS at %s", _redact_url(settings.nats_url))
 
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
 
-    setup_events(client, nc, settings.cooldown_seconds)
+    setup_events(
+        client,
+        nc,
+        settings.cooldown_seconds,
+        settings.nats_message_hmac_key,
+        settings.short_response_channel_id,
+        settings.short_response_char_limit,
+    )
 
     async def _shutdown() -> None:
         logger.info("Shutting down...")
@@ -47,6 +58,6 @@ async def run(settings: Settings) -> None:
     loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
 
     # Start reply consumer as a background task
-    loop.create_task(start_reply_consumer(client, nc))
+    loop.create_task(start_reply_consumer(client, nc, settings.nats_message_hmac_key))
 
     await client.start(settings.discord_token)

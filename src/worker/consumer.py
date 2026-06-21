@@ -1,14 +1,15 @@
 """NATS JetStream pull consumer loop for the worker service."""
 import asyncio
-import json
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 import nats
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from config import Settings
 from llm.router import LLMRouter, build_provider
-from messaging.streams import MESSAGES_STREAM, MESSAGES_SUBJECT, ensure_streams
+from messaging.security import MessageAuthError, verify_payload
+from messaging.streams import MESSAGES_STREAM, MESSAGES_SUBJECT
 from rag.client import get_client
 from worker.pipeline import process_event
 
@@ -18,11 +19,16 @@ _FETCH_TIMEOUT = 5.0   # seconds to wait for next message before looping
 _FETCH_BATCH = 1       # process one message at a time for predictable load
 
 
+def _redact_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunsplit((parsed.scheme, f"***@{parsed.netloc.rsplit('@', 1)[1]}", parsed.path, parsed.query, parsed.fragment))
+
+
 async def run(settings: Settings) -> None:
     nc = await nats.connect(settings.nats_url)
-    logger.info("Worker connected to NATS at %s", settings.nats_url)
-
-    await ensure_streams(nc)
+    logger.info("Worker connected to NATS at %s", _redact_url(settings.nats_url))
 
     js = nc.jetstream()
     psub = await js.pull_subscribe(
@@ -64,7 +70,11 @@ async def run(settings: Settings) -> None:
 
         for msg in msgs:
             try:
-                event = json.loads(msg.data)
+                event = verify_payload(msg.data, "bot", settings.nats_message_hmac_key)
+            except MessageAuthError as exc:
+                logger.warning("Rejected unsigned or invalid bot message: %s", exc)
+                await msg.ack()
+                continue
             except Exception as exc:
                 logger.warning("Failed to decode event: %s", exc)
                 await msg.nak()
@@ -88,6 +98,7 @@ async def run(settings: Settings) -> None:
                     max_history_pairs=settings.max_history_pairs,
                     rerank_model=settings.rerank_model,
                     rerank_top_k=settings.rerank_top_k,
+                    message_hmac_key=settings.nats_message_hmac_key,
                 )
                 await msg.ack()
             except Exception:

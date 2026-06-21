@@ -1,11 +1,20 @@
 services:
   qdrant:
-    image: docker.io/qdrant/qdrant:latest
+    image: docker.io/qdrant/qdrant:v1.18.0
     restart: unless-stopped
+    user: "10001:10001"
     environment:
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
     volumes:
       - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "bash -c ':> /dev/tcp/localhost/6333' || exit 1"]
       interval: 10s
@@ -13,14 +22,27 @@ services:
       retries: 5
 
   nats:
-    image: docker.io/nats:2.10-alpine
+    image: docker.io/nats:2.10.26-alpine
     restart: unless-stopped
+    user: "10001:10001"
     command: ["--config", "/etc/nats/nats.conf"]
+    environment:
+      NATS_BOT_USER: "${NATS_BOT_USER}"
+      NATS_BOT_PASSWORD: "${NATS_BOT_PASSWORD}"
+      NATS_WORKER_USER: "${NATS_WORKER_USER}"
+      NATS_WORKER_PASSWORD: "${NATS_WORKER_PASSWORD}"
+      NATS_API_USER: "${NATS_API_USER}"
+      NATS_API_PASSWORD: "${NATS_API_PASSWORD}"
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro,z
       - nats_data:/data
-    ports:
-      - "8222:8222"    # monitoring (internal only in prod — remove port if not needed)
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
       interval: 10s
@@ -32,12 +54,23 @@ services:
       context: .
       dockerfile: docker/bot.Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
-      NATS_URL: "nats://nats:4222"
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      NATS_URL: "nats://${NATS_BOT_USER}:${NATS_BOT_PASSWORD}@nats:4222"
+      NATS_MESSAGE_HMAC_KEY: "${NATS_MESSAGE_HMAC_KEY}"
+      COOLDOWN_SECONDS: "${COOLDOWN_SECONDS:-6}"
+      SHORT_RESPONSE_CHANNEL_ID: "${SHORT_RESPONSE_CHANNEL_ID:-}"
+      SHORT_RESPONSE_CHAR_LIMIT: "${SHORT_RESPONSE_CHAR_LIMIT:-0}"
     depends_on:
-      nats:
+      api:
         condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -49,16 +82,45 @@ services:
       context: .
       dockerfile: docker/worker.Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
-      NATS_URL: "nats://nats:4222"
+      NATS_URL: "nats://${NATS_WORKER_USER}:${NATS_WORKER_PASSWORD}@nats:4222"
+      NATS_MESSAGE_HMAC_KEY: "${NATS_MESSAGE_HMAC_KEY}"
       QDRANT_URL: "http://qdrant:6333"
-      # OLLAMA_BASE_URL and EMBED_BASE_URL come from .env (pointing at LM Studio)
+      QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-groq}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+      OPENAI_ENABLE_WEB_SEARCH: "${OPENAI_ENABLE_WEB_SEARCH:-false}"
+      OPENAI_WEB_SEARCH_MAX_RESULTS: "${OPENAI_WEB_SEARCH_MAX_RESULTS:-5}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2}"
+      EMBED_PROVIDER: "${EMBED_PROVIDER:-local}"
+      EMBED_BASE_URL: "${EMBED_BASE_URL:-}"
+      EMBED_MODEL: "${EMBED_MODEL:-all-MiniLM-L6-v2}"
+      RERANK_MODEL: "${RERANK_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}"
+      RERANK_TOP_K: "${RERANK_TOP_K:-5}"
+      WIKI_COLLECTION: "${WIKI_COLLECTION:-wiki}"
+      SUBTITLES_COLLECTION: "${SUBTITLES_COLLECTION:-subtitles}"
+      ADDONS_COLLECTION: "${ADDONS_COLLECTION:-addons}"
+      RELEVANCE_THRESHOLD: "${RELEVANCE_THRESHOLD:-0.30}"
+      K_FACTUAL: "${K_FACTUAL:-8}"
+      K_COMPARATIVE: "${K_COMPARATIVE:-10}"
+      MAX_ENUM_CHARS: "${MAX_ENUM_CHARS:-8000}"
+      MAX_COMPARATIVE_CHARS: "${MAX_COMPARATIVE_CHARS:-16000}"
+      MAX_HISTORY_PAIRS: "${MAX_HISTORY_PAIRS:-3}"
     depends_on:
-      nats:
+      api:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -70,10 +132,23 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     restart: unless-stopped
-    env_file: .env
     environment:
-      NATS_URL: "nats://nats:4222"
+      NATS_URL: "nats://${NATS_API_USER}:${NATS_API_PASSWORD}@nats:4222"
       QDRANT_URL: "http://qdrant:6333"
+      QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      API_KEYS: "${API_KEYS}"
+      WIKI_HOST: "${WIKI_HOST:-tensura.wiki.gg}"
+      WIKI_COLLECTION: "${WIKI_COLLECTION:-wiki}"
+      SUBTITLES_COLLECTION: "${SUBTITLES_COLLECTION:-subtitles}"
+      ADDONS_COLLECTION: "${ADDONS_COLLECTION:-addons}"
+      ADDON_SOURCE_URLS: "${ADDON_SOURCE_URLS:-https://wiki.trbeyond.com/wiki,https://modrinth.com/mod/tensura-beyond-worlds}"
+      ADDON_MOD_WIKI_MAX_PAGES: "${ADDON_MOD_WIKI_MAX_PAGES:-8}"
+      EMBED_PROVIDER: "${EMBED_PROVIDER:-local}"
+      EMBED_BASE_URL: "${EMBED_BASE_URL:-}"
+      EMBED_MODEL: "${EMBED_MODEL:-all-MiniLM-L6-v2}"
+      COOLDOWN_SECONDS: "${COOLDOWN_SECONDS:-6}"
+      HISTORY_TTL_SECONDS: "${HISTORY_TTL_SECONDS:-600}"
+      SUBDL_API_KEY: "${SUBDL_API_KEY:-}"
     ports:
       - "8080:8080"
     depends_on:
@@ -81,6 +156,15 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -92,7 +176,7 @@ services:
       - addon_cache:/app/data/addons
 
   ollama:
-    image: docker.io/ollama/ollama:latest
+    image: docker.io/ollama/ollama:0.5.7
     restart: unless-stopped
     volumes:
       - ollama_data:/root/.ollama
@@ -101,6 +185,7 @@ services:
 
 volumes:
   qdrant_data:
+  qdrant_snapshots:
   nats_data:
   ollama_data:
   page_cache:
